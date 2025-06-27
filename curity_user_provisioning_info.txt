@@ -1,0 +1,125 @@
+Curity UMS + OAuth Client Provisioning
+==============================================
+
+Data: 2025-06-27 16:57:16
+
+## 📦 Postman Collection Overview
+
+Steps:
+1. Get Admin Token (Client Credentials Flow)
+2. Create User (via UMS SCIM API)
+3. Create OAuth Client (via DCR API)
+4. Return or log user/client info
+
+Environment Variables:
+-----------------------
+- base_url: https://idsvr.example.com
+- admin_client_id: your-admin-client-id
+- admin_client_secret: your-admin-client-secret
+- new_username: the username to create
+- new_user_password: strong password for user
+- new_user_email: email for user
+
+---
+
+## ✅ Example Postman Request (Create User)
+POST {base_url}/user-management/Users
+
+Headers:
+Authorization: Bearer {admin_token}
+Content-Type: application/scim+json
+
+Body:
+{
+  "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+  "userName": "{new_username}",
+  "password": "{new_user_password}",
+  "emails": [{"value": "{new_user_email}", "primary": true}]
+}
+
+---
+
+## ✅ Example Postman Request (Dynamic Client Registration)
+POST {base_url}/oauth/v2/dcr
+
+Headers:
+Authorization: Bearer {admin_token}
+Content-Type: application/json
+
+Body:
+{
+  "grant_types": ["client_credentials"],
+  "token_endpoint_auth_method": "client_secret_post",
+  "client_name": "client-{new_username}",
+  "scope": "users:manage"
+}
+
+Response:
+- client_id
+- client_secret
+
+---
+
+## 💻 .NET 8 Sample Code (User + Client Creation)
+
+using System.Net.Http.Headers;
+using System.Text.Json;
+using System.Text;
+
+public class CurityProvisioningService {
+    private readonly HttpClient _http = new();
+
+    public async Task<ProvisionedClient> CreateUserAndClientAsync(string username, string password, string email) {
+        var tokenResp = await _http.PostAsync("https://idsvr/oauth/v2/oauth-token", new FormUrlEncodedContent(new Dictionary<string, string> {
+            ["grant_type"] = "client_credentials",
+            ["client_id"] = "<admin_client_id>",
+            ["client_secret"] = "<admin_client_secret>",
+            ["scope"] = "dcr:write users:manage"
+        }));
+
+        var tokenJson = JsonDocument.Parse(await tokenResp.Content.ReadAsStringAsync());
+        string adminToken = tokenJson.RootElement.GetProperty("access_token").GetString();
+
+        _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", adminToken);
+
+        var userBody = new {
+            schemas = new[] { "urn:ietf:params:scim:schemas:core:2.0:User" },
+            userName = username,
+            password = password,
+            emails = new[] { new { value = email, primary = true } }
+        };
+
+        var userResp = await _http.PostAsync("https://idsvr/user-management/Users", new StringContent(JsonSerializer.Serialize(userBody), Encoding.UTF8, "application/scim+json"));
+        var userId = JsonDocument.Parse(await userResp.Content.ReadAsStringAsync()).RootElement.GetProperty("id").GetString();
+
+        var dcrBody = new {
+            grant_types = new[] { "client_credentials" },
+            token_endpoint_auth_method = "client_secret_post",
+            client_name = $"cli-{username}-{Guid.NewGuid():N}",
+            scope = "users:manage"
+        };
+
+        var dcrResp = await _http.PostAsync("https://idsvr/oauth/v2/dcr", new StringContent(JsonSerializer.Serialize(dcrBody), Encoding.UTF8, "application/json"));
+        var dcrJson = JsonDocument.Parse(await dcrResp.Content.ReadAsStringAsync()).RootElement;
+
+        return new ProvisionedClient {
+            UserId = userId,
+            ClientId = dcrJson.GetProperty("client_id").GetString(),
+            ClientSecret = dcrJson.GetProperty("client_secret").GetString()
+        };
+    }
+}
+
+public class ProvisionedClient {
+    public string UserId { get; set; }
+    public string ClientId { get; set; }
+    public string ClientSecret { get; set; }
+}
+
+---
+
+Security Notes:
+---------------
+- Store client_secret securely (never expose to frontend)
+- Use HTTPS in all communications
+- Use a vault like AWS Secrets Manager, Azure Key Vault, or HashiCorp Vault for client credentials
